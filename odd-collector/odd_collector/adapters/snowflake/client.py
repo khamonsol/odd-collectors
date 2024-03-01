@@ -22,124 +22,111 @@ from .domain import (
 from .logger import logger
 
 TABLES_VIEWS_QUERY = """
-    with recursive cte as (
-        select
-            referenced_database,
-            referenced_schema,
-            referenced_object_name,
-            referenced_object_id,
-            referenced_object_domain,
-            referencing_database,
-            referencing_schema,
-            referencing_object_name,
-            referencing_object_id,
-            referencing_object_domain
-        from snowflake.account_usage.object_dependencies
-        union all
-        select
-            deps.referenced_database,
-            deps.referenced_schema,
-            deps.referenced_object_name,
-            deps.referenced_object_id,
-            deps.referenced_object_domain,
-            deps.referencing_database,
-            deps.referencing_schema,
-            deps.referencing_object_name,
-            deps.referencing_object_id,
-            deps.referencing_object_domain
-        from snowflake.account_usage.object_dependencies deps
-        join cte
-            on deps.referencing_object_id = cte.referenced_object_id
-            and deps.referencing_object_domain = cte.referenced_object_domain
-    ),
-    upstream as (
-        select
-            referencing_database as node_database,
-            referencing_schema as node_schema,
-            referencing_object_name as node_name,
-            referencing_object_domain as node_domain,
-            array_agg(
-                distinct concat_ws(
-                    '.',
-                    referenced_database,
-                    referenced_schema,
-                    referenced_object_name,
-                    referenced_object_domain
-                )
-            ) as nodes
-        from cte
-        group by
-            referencing_database,
-            referencing_schema,
-            referencing_object_name,
-            referencing_object_id,
-            referencing_object_domain
-    ),
-    downstream as (
-        select
-            referenced_database as node_database,
-            referenced_schema as node_schema,
-            referenced_object_name as node_name,
-            referenced_object_domain as node_domain,
-            array_agg(
-                distinct concat_ws(
-                    '.',
-                    referencing_database,
-                    referencing_schema,
-                    referencing_object_name,
-                    referencing_object_domain
-                )
-            ) as nodes
-        from cte
-        group by referenced_database,
-            referenced_schema,
-            referenced_object_name,
-            referenced_object_id,
-            referenced_object_domain
-    )
-    select
-        t.table_catalog,
-        t.table_schema,
-        t.table_name,
-        t.table_owner,
-        t.table_type,
-        t.is_transient,
-        t.clustering_key,
-        t.row_count,
-        t.bytes,
-        t.retention_time,
-        t.self_referencing_column_name,
-        t.reference_generation,
-        t.user_defined_type_catalog,
-        t.user_defined_type_schema,
-        t.user_defined_type_name,
-        t.is_insertable_into,
-        t.is_typed,
-        t.created,
-        t.last_altered,
-        t.auto_clustering_on,
-        t.comment as table_comment,
-        v.comment as view_comment,
-        v.view_definition,
-        v.is_secure,
-        v.is_updatable,
-        array_to_string(u.nodes, ',') as upstream,
-        array_to_string(d.nodes, ',') as downstream
-    from information_schema.tables t
-    left join information_schema.views as v
-        on v.table_catalog = t.table_catalog
-        and v.table_schema = t.table_schema
-        and v.table_name = t.table_name
-    left join upstream u
-        on u.node_database = t.table_catalog
-        and u.node_schema = t.table_schema
-        and u.node_name = t.table_name
-    left join downstream d
-        on d.node_database = t.table_catalog
-        and d.node_schema = t.table_schema
-        and d.node_name = t.table_name
-    where t.table_schema != 'INFORMATION_SCHEMA'
-    order by table_catalog, table_schema, table_name;
+     WITH RECURSIVE cte AS (
+    SELECT
+        referenced_database,
+        referenced_schema,
+        referenced_object_name,
+        referenced_object_id,
+        referenced_object_domain,
+        referencing_database,
+        referencing_schema,
+        referencing_object_name,
+        referencing_object_id,
+        referencing_object_domain,
+        CAST(referenced_database || '.' || referenced_schema || '.' || referenced_object_name || '>' || referencing_database || '.' || referencing_schema || '.' || referencing_object_name AS VARCHAR) AS path
+    FROM snowflake.account_usage.object_dependencies
+    UNION ALL
+    SELECT
+        deps.referenced_database,
+        deps.referenced_schema,
+        deps.referenced_object_name,
+        deps.referenced_object_id,
+        deps.referenced_object_domain,
+        deps.referencing_database,
+        deps.referencing_schema,
+        deps.referencing_object_name,
+        deps.referencing_object_id,
+        deps.referencing_object_domain,
+        cte.path || ',' || CAST(deps.referenced_database || '.' || deps.referenced_schema || '.' || deps.referenced_object_name || '>' || deps.referencing_database || '.' || deps.referencing_schema || '.' || deps.referencing_object_name AS VARCHAR)
+    FROM snowflake.account_usage.object_dependencies deps
+    JOIN cte ON deps.referencing_object_id = cte.referenced_object_id
+        AND deps.referencing_object_domain = cte.referenced_object_domain
+    WHERE NOT CONTAINS(cte.path, CAST(deps.referenced_database || '.' || deps.referenced_schema || '.' || deps.referenced_object_name || '>' || deps.referencing_database || '.' || deps.referencing_schema || '.' || deps.referencing_object_name AS VARCHAR))
+),
+upstream AS (
+    SELECT
+        referencing_database AS node_database,
+        referencing_schema AS node_schema,
+        referencing_object_name AS node_name,
+        referencing_object_domain AS node_domain,
+        ARRAY_AGG(DISTINCT CONCAT_WS('.', referenced_database, referenced_schema, referenced_object_name, referenced_object_domain)) AS nodes
+    FROM cte
+    GROUP BY
+        referencing_database,
+        referencing_schema,
+        referencing_object_name,
+        referencing_object_id,
+        referencing_object_domain
+),
+downstream AS (
+    SELECT
+        referenced_database AS node_database,
+        referenced_schema AS node_schema,
+        referenced_object_name AS node_name,
+        referenced_object_domain AS node_domain,
+        ARRAY_AGG(DISTINCT CONCAT_WS('.', referencing_database, referencing_schema, referencing_object_name, referencing_object_domain)) AS nodes
+    FROM cte
+    GROUP BY
+        referenced_database,
+        referenced_schema,
+        referenced_object_name,
+        referenced_object_id,
+        referenced_object_domain
+),
+tables_and_views AS (
+    SELECT
+        table_catalog AS object_catalog,
+        table_schema AS object_schema,
+        table_name AS object_name,
+        'TABLE' AS object_type,
+        table_owner,
+        NULL AS view_definition,
+        is_insertable_into,
+        is_typed,
+        created,
+        last_altered,
+        comment AS object_comment,
+        ARRAY_TO_STRING(u.nodes, ',') AS upstream,
+        ARRAY_TO_STRING(d.nodes, ',') AS downstream
+    FROM information_schema.tables
+    LEFT JOIN upstream u ON u.node_database = table_catalog AND u.node_schema = table_schema AND u.node_name = table_name
+    LEFT JOIN downstream d ON d.node_database = table_catalog AND d.node_schema = table_schema AND d.node_name = table_name
+    WHERE table_schema != 'INFORMATION_SCHEMA'
+
+    UNION ALL
+
+    SELECT
+        table_catalog AS object_catalog,
+        table_schema AS object_schema,
+        table_name AS object_name,
+        'VIEW' AS object_type,
+        NULL AS table_owner,  -- Views don't have an owner in the same sense tables do
+        view_definition,
+        NULL AS is_insertable_into,
+        NULL AS is_typed,
+        created,
+        last_altered,
+        comment AS object_comment,
+        ARRAY_TO_STRING(u.nodes, ',') AS upstream,
+        ARRAY_TO_STRING(d.nodes, ',') AS downstream
+    FROM information_schema.views
+    LEFT JOIN upstream u ON u.node_database = table_catalog AND u.node_schema = table_schema AND u.node_name = table_name
+    LEFT JOIN downstream d ON d.node_database = table_catalog AND d.node_schema = table_schema AND d.node_name = table_name
+    WHERE table_schema != 'INFORMATION_SCHEMA'
+)
+SELECT * FROM tables_and_views
+ORDER BY object_catalog, object_schema, object_name;
 """
 
 COLUMNS_QUERY = """
